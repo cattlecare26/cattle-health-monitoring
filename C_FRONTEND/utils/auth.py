@@ -33,11 +33,13 @@ def init_session_state():
 def _detect_effective_role(user: dict) -> str:
     """
     Determine the effective role from user data.
-    Super Admin = admin with empty farm_ids (has access to everything).
+    Super Admin = explicit super_admin role OR admin with empty farm_ids.
     Admin = admin with specific farm_ids (scoped).
     User = regular user role.
     """
     role = user.get("role", "user")
+    if role == "super_admin":
+        return "super_admin"
     if role == "admin":
         farm_ids = user.get("farm_ids", [])
         if not farm_ids:

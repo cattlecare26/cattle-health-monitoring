@@ -29,7 +29,7 @@ def render():
     latest_data = api_get_all_latest(token) or []
     recent_alerts = api_get_recent_alerts(token, limit=20) or []
 
-    admins = [u for u in users if u.get("role") == "admin"]
+    admins = [u for u in users if u.get("role") in ("admin", "super_admin")]
     farmers = [u for u in users if u.get("role") == "user"]
 
     c1, c2, c3, c4 = st.columns(4)
@@ -105,12 +105,17 @@ def render():
         if users:
             table = []
             for u in users:
-                role = t("admin", lang) if u.get("role") == "admin" else t("user", lang)
-                is_sa = "SA" if not u.get("farm_ids") and u.get("role") == "admin" else ""
+                u_role = u.get("role", "user")
+                if u_role == "super_admin" or (u_role == "admin" and not u.get("farm_ids")):
+                    role_label = t("super_admin", lang)
+                elif u_role == "admin":
+                    role_label = t("admin", lang)
+                else:
+                    role_label = t("user", lang)
                 table.append({
                     t("username", lang): u.get("username", ""),
                     t("full_name", lang): u.get("full_name", ""),
-                    t("role", lang): f"{is_sa} {role}".strip(),
+                    t("role", lang): role_label,
                     t("assigned_farms", lang): ", ".join(u.get("farm_ids", [])) or "All",
                     t("status", lang): "🟢" if u.get("is_active") else "🔴",
                 })

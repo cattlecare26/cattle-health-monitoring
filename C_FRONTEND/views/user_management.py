@@ -60,9 +60,13 @@ def _render_user_list(lang: str, token: str, p: dict, scope_farms: list = None):
 
     table = []
     for u in users:
-        role_label = t("admin", lang) if u.get("role") == "admin" else t("user", lang)
-        if not u.get("farm_ids") and u.get("role") == "admin":
+        u_role = u.get("role", "user")
+        if u_role == "super_admin" or (u_role == "admin" and not u.get("farm_ids")):
             role_label = t("super_admin", lang)
+        elif u_role == "admin":
+            role_label = t("admin", lang)
+        else:
+            role_label = t("user", lang)
         table.append({
             t("username", lang): u.get("username", ""),
             t("full_name", lang): u.get("full_name", ""),
@@ -215,10 +219,17 @@ def _render_edit_user(lang: str, token: str, current_user: dict, p: dict):
         col1, col2 = st.columns(2)
         with col1:
             full_name = st.text_input(t("full_name", lang), value=user.get("full_name", ""))
+            role_options = ["user", "admin", "super_admin"]
+            current_role = user.get("role", "user")
+            role_index = role_options.index(current_role) if current_role in role_options else 0
             role = st.selectbox(
-                t("role", lang), ["user", "admin"],
-                index=0 if user.get("role") == "user" else 1,
-                format_func=lambda x: f"{t('admin', lang)} (Vet Doctor)" if x == "admin" else f"{t('user', lang)} (Farmer)",
+                t("role", lang), role_options,
+                index=role_index,
+                format_func=lambda x: (
+                    f"{t('super_admin', lang)}" if x == "super_admin"
+                    else f"{t('admin', lang)} (Vet Doctor)" if x == "admin"
+                    else f"{t('user', lang)} (Farmer)"
+                ),
             )
         with col2:
             farm_ids = st.text_input(
