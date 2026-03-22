@@ -146,6 +146,8 @@ class CattleResponse(BaseModel):
     breed: str
     age: int
     status: str
+    assigned_to: Optional[str] = None
+    owned_by: Optional[str] = None
     created_at: Optional[datetime] = None
 
 

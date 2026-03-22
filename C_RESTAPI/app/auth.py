@@ -61,8 +61,8 @@ async def require_authenticated_user(
 async def require_admin(
     user: dict = Depends(require_authenticated_user),
 ) -> dict:
-    """Require an admin-role user."""
-    if user.get("role") != "admin":
+    """Require an admin-role or super_admin-role user."""
+    if user.get("role") not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
@@ -86,8 +86,10 @@ def require_farm_access(user: Optional[dict], farm_id: str) -> None:
     """
     if user is None:
         return  # API key auth — no farm restriction
-    if user.get("role") == "admin" and not user.get("farm_ids"):
+    if user.get("role") == "super_admin":
         return  # Super admin — access to all farms
+    if user.get("role") == "admin" and not user.get("farm_ids"):
+        return  # Admin with no farm restriction — access to all farms
     if farm_id not in user.get("farm_ids", []):
         raise HTTPException(
             status_code=403,

@@ -10,7 +10,7 @@ import re
 
 # ── Enums ──
 
-VALID_ROLES = ("admin", "user")
+VALID_ROLES = ("super_admin", "admin", "user")
 
 
 # ── Request Models ──
@@ -79,6 +79,7 @@ class UserResponse(BaseModel):
     role: str
     farm_ids: list[str]
     is_active: bool
+    managed_by: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
