@@ -55,6 +55,7 @@ def transform_sensor_rows(cid: int, rows: list[SensorRow]) -> list[dict]:
 async def bulk_insert_sensor_data(cid: int, rows: list[SensorRow]) -> int:
     """
     Validate cattle exists, then transform and insert sensor data.
+    Automatically triggers health evaluation after ingestion.
     Returns the number of documents inserted.
     Raises ValueError if cattle is not registered.
     """
@@ -79,6 +80,14 @@ async def bulk_insert_sensor_data(cid: int, rows: list[SensorRow]) -> int:
         collection=SENSOR_COLLECTION, cid=cid, records_count=inserted,
         message=f"Sensor batch inserted successfully for CID {cid}",
     )
+
+    # Trigger automatic health evaluation after sensor ingestion
+    try:
+        from app.alert_services import evaluate_cattle_health
+        await evaluate_cattle_health(cid)
+    except Exception:
+        pass  # Alert evaluation should never block sensor ingestion
+
     return inserted
 
 

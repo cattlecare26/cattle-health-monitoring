@@ -11,6 +11,8 @@ Backend service that receives bulk sensor data from ESP32 devices and stores it 
 | DB Driver | Motor | Async MongoDB driver, supports `insertMany` |
 | Validation | Pydantic v2 | Automatic request validation with clear errors |
 | Config | pydantic-settings | Type-safe env var loading from `.env` |
+| Auth | python-jose + bcrypt | JWT tokens + industry-standard password hashing |
+| Alerts | matplotlib + smtplib | Health graph generation + email notifications |
 
 ## Project Structure
 
@@ -18,19 +20,28 @@ Backend service that receives bulk sensor data from ESP32 devices and stores it 
 C_RESTAPI/
 ├── app/
 │   ├── __init__.py
-│   ├── main.py          # FastAPI app entry point
-│   ├── auth.py          # API key authorization dependency
-│   ├── config.py        # Environment variable settings
-│   ├── database.py      # MongoDB connection & indexes
-│   ├── logger.py        # Async logging to MongoDB logs collection
-│   ├── models.py        # Pydantic request/response/DB models
-│   ├── routes.py        # API endpoint definitions
-│   └── services.py      # Data transformation & DB operations
-├── data.json            # Sample ESP32 sensor data
+│   ├── main.py            # FastAPI app entry point
+│   ├── auth.py            # Dual auth: JWT Bearer + API key, RBAC dependencies
+│   ├── config.py          # Environment variable settings (JWT, SMTP, thresholds)
+│   ├── database.py        # MongoDB connection, indexes & collection setup
+│   ├── logger.py          # Async logging to MongoDB logs collection
+│   ├── models.py          # Pydantic models (cattle/sensor)
+│   ├── user_models.py     # Pydantic models (users/auth)
+│   ├── alert_models.py    # Pydantic models (health alerts)
+│   ├── routes.py          # Cattle/sensor/health endpoints (RBAC-protected)
+│   ├── user_routes.py     # Auth & user management endpoints
+│   ├── alert_routes.py    # Health alert & evaluation endpoints
+│   ├── services.py        # Data transformation & DB operations
+│   ├── user_services.py   # User CRUD, bcrypt, JWT management
+│   ├── alert_services.py  # Alert orchestration, counter tracking, notifications
+│   ├── health_evaluator.py # Sensor data → health status evaluation engine
+│   ├── graph_service.py   # Matplotlib time-series graph generation
+│   └── email_service.py   # SMTP email with embedded health graphs
+├── data.json              # Sample ESP32 sensor data
 ├── requirements.txt
 ├── Dockerfile
-├── .env                 # Local environment variables (not committed)
-├── .env.example         # Template for .env
+├── .env                   # Local environment variables (not committed)
+├── .env.example           # Template for .env
 └── .gitignore
 ```
 
@@ -40,7 +51,7 @@ C_RESTAPI/
 ESP32 Device → FastAPI Backend → MongoDB Atlas (Database: CDataBase)
 ```
 
-Collections: `cattle` · `cattle_sensor_data_ts` · `cattle_health_events` · `logs`
+Collections: `cattle` · `cattle_sensor_data_ts` · `cattle_health_events` · `users` · `health_alerts` · `alert_counters` · `logs`
 
 ## MongoDB Schema
 
@@ -73,8 +84,47 @@ Example document:
 }
 ```
 
+### Collection: `users`
+Stores user accounts with bcrypt-hashed passwords and RBAC roles.
+
+Example document:
+```json
+{
+  "username": "admin1",
+  "email": "admin@farm.com",
+  "hashed_password": "$2b$12$...",
+  "full_name": "Farm Admin",
+  "role": "admin",
+  "farm_ids": ["Farm-A", "Farm-B"],
+  "is_active": true,
+  "created_at": "2026-03-22T...",
+  "updated_at": "2026-03-22T..."
+}
+```
+
 ### Collection: `cattle_health_events`
 Stores alerts and anomaly events.
+
+### Collection: `health_alerts`
+Stores health alert records with admin notification tracking.
+
+Example document:
+```json
+{
+  "cid": 1,
+  "admin_username": "admin",
+  "admin_email": "admin@farm.com",
+  "status": "critical",
+  "consecutive_count": 4,
+  "email_sent": true,
+  "health_details": { "overall_status": "bad", "reasons": ["High temperature: 40.2°C"], "latest_temperature": 40.2, "latest_bpm": 73 },
+  "graph_generated": true,
+  "timestamp": "2026-03-22T..."
+}
+```
+
+### Collection: `alert_counters`
+Tracks consecutive bad readings per cattle for alert escalation.
 
 ### Collection: `logs` *(Time Series)*
 Stores structured backend operation logs for debugging and monitoring.
@@ -105,31 +155,54 @@ Example document:
 cattle:                  { cid: 1 }  (unique)
 cattle_sensor_data_ts:   { cid: 1, timestamp_iso: -1 }
 cattle_health_events:    { cid: 1 }, { timestamp: -1 }
+users:                   { username: 1 } (unique), { email: 1 } (unique)
+health_alerts:           { cid: 1 }, { timestamp: -1 }, { cid: 1, timestamp: -1 }
+alert_counters:          { cid: 1 } (unique)
 logs:                    { service: 1, timestamp: -1 }, { cid: 1 }
 ```
 
-## API Authorization
+## API Authentication
 
-All API endpoints (except the health check `/`) require a valid API key in the `X-API-Key` header.
+The API supports **two authentication methods**:
 
-**Header:**
+### 1. JWT Bearer Token (for users/dashboard)
+
+First bootstrap the admin user, then login to get a token:
+
+```bash
+# Bootstrap first admin (only works once when no users exist)
+curl -X POST http://localhost:8000/api/v1/auth/bootstrap \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","email":"admin@farm.com","password":"SecurePass123","full_name":"Farm Admin","farm_ids":["Farm-A"]}'
+
+# Login
+curl -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"SecurePass123"}'
+
+# Use the token
+curl -H "Authorization: Bearer <token>" http://localhost:8000/api/v1/cattle
+```
+
+### 2. API Key (for ESP32 devices)
+
 ```
 X-API-Key: cattle_monitoring_secure_key
 ```
 
-**Example request:**
-```bash
-curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/cattle
-```
+### Role-Based Access Control (RBAC)
 
-**Unauthorized response (401):**
-```json
-{ "detail": "Unauthorized request: Invalid API key" }
-```
+| Role | Permissions |
+|------|------------|
+| **admin** | Full CRUD on cattle in assigned farms, manage users, ingest sensor data |
+| **user** | Read-only access to cattle/sensor/health data in assigned farms |
 
-The API key is configured via the `API_SECRET_KEY` environment variable in `.env`. For deployment (Railway, Render, etc.), set this variable in the platform's environment settings.
+### Resource Ownership
 
-**ESP32 devices** must include the `X-API-Key` header in every HTTP request.
+- Users are assigned to `farm_ids` (e.g., `["Farm-A", "Farm-B"]`)
+- Admin of "Farm-A" owns and manages all cattle with `farm_id: "Farm-A"`
+- Users of "Farm-A" can view (but not modify) those cattle
+- Admins with empty `farm_ids` have super-admin access to all farms
 
 ## Data Transformation
 
@@ -143,6 +216,109 @@ ESP32 sends flat data → backend converts to structured format:
 | `signal, peak, down, bpm` | `heart: { signal, peak, down, bpm }` |
 
 ## API
+
+### User Management & Authentication
+
+#### `POST /api/v1/auth/bootstrap`
+Create the first admin user. **Only works when no users exist** (open, no auth).
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/bootstrap \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","email":"admin@farm.com","password":"SecurePass123","full_name":"Farm Admin","farm_ids":["Farm-A"]}'
+```
+
+#### `POST /api/v1/auth/login`
+Authenticate and receive a JWT token.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"SecurePass123"}'
+```
+
+**Response:**
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "token_type": "bearer",
+  "expires_in": 3600,
+  "user": { "username": "admin", "email": "admin@farm.com", "role": "admin", ... }
+}
+```
+
+#### `POST /api/v1/auth/register`
+Register a new user. **Admin JWT required.**
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/register \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"farmuser","email":"user@farm.com","password":"UserPass123","full_name":"Farm User","role":"user","farm_ids":["Farm-A"]}'
+```
+
+#### `GET /api/v1/auth/me`
+Get current user profile. **JWT required.**
+
+#### `GET /api/v1/auth/users`
+List all users. **Admin JWT required.**
+
+#### `PUT /api/v1/auth/users/{username}`
+Update user role, farm assignments, or active status. **Admin JWT required.**
+
+#### `DELETE /api/v1/auth/users/{username}`
+Deactivate a user account. **Admin JWT required.**
+
+---
+
+### Health Alerts & Notifications
+
+#### `POST /api/v1/alerts/evaluate/{cid}`
+Evaluate health for a specific cattle. Processes latest sensor data, updates the consecutive counter, and triggers alerts + email if thresholds are met. **Admin / API key required.**
+
+```bash
+curl -X POST http://localhost:8000/api/v1/alerts/evaluate/1 \
+  -H "Authorization: Bearer <token>"
+```
+
+**Response:**
+```json
+{
+  "cid": 1,
+  "status": "bad",
+  "consecutive_bad_count": 4,
+  "alert_level": "critical",
+  "alert_triggered": true,
+  "email_sent": true,
+  "conditions": [{ "status": "bad", "reasons": ["High temperature: 40.2°C (threshold: 39.5°C)"], "temperature": 40.2, "bpm": 73.0, "activity_magnitude": 16312.49 }],
+  "message": "Cattle 1 status: bad (4 consecutive bad readings). Alert level: CRITICAL. Email notification sent."
+}
+```
+
+#### `POST /api/v1/alerts/evaluate-all`
+Evaluate health for all registered cattle. **Admin / API key required.**
+
+#### `GET /api/v1/alerts/{cid}`
+Get alert history for a specific cattle, newest first.
+
+#### `GET /api/v1/alerts/recent/all`
+Get recent alerts across all cattle (dashboard alert panel).
+
+#### `GET /api/v1/alerts/{cid}/counter`
+Get the current consecutive bad-reading counter for a cattle.
+
+#### Alert Levels
+
+| Level | Condition | Action |
+|-------|-----------|--------|
+| **Warning** | 1–3 consecutive bad readings | Alert logged to `health_alerts` |
+| **Critical** | ≥ 4 consecutive bad readings | Alert logged + 48h graph generated + email sent to farm admin |
+
+The counter resets automatically when a healthy reading is detected.
+
+**Automatic evaluation** also runs after each sensor bulk ingestion (`POST /api/v1/cattle/sensor/bulk`).
+
+---
 
 ### Cattle Management
 
@@ -356,21 +532,33 @@ curl -H "X-API-Key: cattle_monitoring_secure_key" "http://localhost:8000/api/v1/
 
 ### API Summary
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | Health check |
-| `POST` | `/api/v1/cattle` | Register a new cattle |
-| `GET` | `/api/v1/cattle` | List all cattle |
-| `GET` | `/api/v1/cattle/{cid}` | Get cattle metadata |
-| `PUT` | `/api/v1/cattle/{cid}` | Update cattle metadata |
-| `POST` | `/api/v1/cattle/sensor/bulk` | Bulk ingest sensor data from ESP32 |
-| `GET` | `/api/v1/cattle/latest` | Latest reading for all cattle (dashboard) |
-| `GET` | `/api/v1/cattle/{cid}/latest` | Most recent sensor reading |
-| `GET` | `/api/v1/cattle/{cid}/recent?limit=N` | Last N sensor records |
-| `GET` | `/api/v1/cattle/{cid}/last-hour` | Readings from the past hour |
-| `GET` | `/api/v1/cattle/{cid}/range?start=&end=` | Readings in a time range |
-| `GET` | `/api/v1/cattle/{cid}/health-events` | Health events for a cattle |
-| `GET` | `/api/v1/health-events/recent?limit=N` | Recent health alerts (all cattle) |
+| Method | Endpoint | Access | Description |
+|--------|----------|--------|-------------|
+| `GET` | `/` | Public | Health check |
+| `POST` | `/api/v1/auth/bootstrap` | Public (once) | Create first admin user |
+| `POST` | `/api/v1/auth/login` | Public | Login, get JWT token |
+| `POST` | `/api/v1/auth/register` | Admin | Register a new user |
+| `GET` | `/api/v1/auth/me` | JWT | Current user profile |
+| `GET` | `/api/v1/auth/users` | Admin | List all users |
+| `PUT` | `/api/v1/auth/users/{username}` | Admin | Update user |
+| `DELETE` | `/api/v1/auth/users/{username}` | Admin | Deactivate user |
+| `POST` | `/api/v1/cattle` | Admin / API Key | Register a new cattle |
+| `GET` | `/api/v1/cattle` | Authenticated | List all cattle |
+| `GET` | `/api/v1/cattle/{cid}` | Authenticated | Get cattle metadata |
+| `PUT` | `/api/v1/cattle/{cid}` | Admin / API Key | Update cattle metadata |
+| `POST` | `/api/v1/cattle/sensor/bulk` | Admin / API Key | Bulk ingest sensor data |
+| `GET` | `/api/v1/cattle/latest` | Authenticated | Latest reading (all cattle) |
+| `GET` | `/api/v1/cattle/{cid}/latest` | Authenticated | Most recent sensor reading |
+| `GET` | `/api/v1/cattle/{cid}/recent?limit=N` | Authenticated | Last N sensor records |
+| `GET` | `/api/v1/cattle/{cid}/last-hour` | Authenticated | Readings from past hour |
+| `GET` | `/api/v1/cattle/{cid}/range?start=&end=` | Authenticated | Readings in time range |
+| `GET` | `/api/v1/cattle/{cid}/health-events` | Authenticated | Health events for cattle |
+| `GET` | `/api/v1/health-events/recent?limit=N` | Authenticated | Recent health alerts |
+| `POST` | `/api/v1/alerts/evaluate/{cid}` | Admin / API Key | Evaluate cattle health |
+| `POST` | `/api/v1/alerts/evaluate-all` | Admin / API Key | Evaluate all cattle |
+| `GET` | `/api/v1/alerts/{cid}` | Authenticated | Alert history for cattle |
+| `GET` | `/api/v1/alerts/recent/all` | Authenticated | Recent alerts (all cattle) |
+| `GET` | `/api/v1/alerts/{cid}/counter` | Authenticated | Bad-reading counter |
 
 ## Setup & Run
 

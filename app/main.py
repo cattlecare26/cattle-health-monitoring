@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from app.database import connect_db, close_db
 from app.routes import cattle_router, sensor_router, health_router
+from app.user_routes import auth_router
+from app.alert_routes import alert_router
 from app.config import settings
 
 
@@ -25,9 +27,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(cattle_router)
+app.include_router(auth_router)
 app.include_router(sensor_router)
 app.include_router(health_router)
+app.include_router(cattle_router)
+app.include_router(alert_router)
 
 
 @app.get("/", tags=["Health"])

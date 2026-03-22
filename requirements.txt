@@ -5,3 +5,6 @@ pymongo==4.7.3
 pydantic==2.9.0
 pydantic-settings==2.5.0
 python-dotenv==1.0.1
+bcrypt==4.2.0
+python-jose[cryptography]==3.3.0
+matplotlib==3.9.0

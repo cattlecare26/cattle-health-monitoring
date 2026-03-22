@@ -76,6 +76,34 @@ async def connect_db() -> None:
     except Exception:
         pass
 
+    # User collection indexes
+    try:
+        await db.users.create_index("username", unique=True)
+    except Exception:
+        pass
+    try:
+        await db.users.create_index("email", unique=True)
+    except Exception:
+        pass
+
+    # Health alert indexes
+    try:
+        await db.health_alerts.create_index("cid")
+    except Exception:
+        pass
+    try:
+        await db.health_alerts.create_index([("timestamp", -1)])
+    except Exception:
+        pass
+    try:
+        await db.health_alerts.create_index([("cid", 1), ("timestamp", -1)])
+    except Exception:
+        pass
+    try:
+        await db.alert_counters.create_index("cid", unique=True)
+    except Exception:
+        pass
+
     print(f"✅ Connected to MongoDB: {settings.DATABASE_NAME}")
 
 
