@@ -19,6 +19,8 @@ from app.models import (
     CattleCreateResponse,
     CattleUpdateResponse,
     HealthEventResponse,
+    PredictionDetail,
+    CattleStatusResponse,
 )
 from app.services import (
     bulk_insert_sensor_data,
@@ -33,6 +35,7 @@ from app.services import (
     get_all_cattle,
     get_cattle_health_events,
     get_recent_health_events,
+    get_cattle_status,
 )
 
 cattle_router = APIRouter(
@@ -131,15 +134,38 @@ async def ingest_bulk_sensor_data(
 ):
     """
     Receive bulk sensor data from an ESP32 device.
+    Runs ML prediction on the data and includes results in the response.
     Admin or API key required.
     """
     try:
-        inserted = await bulk_insert_sensor_data(request.cid, request.data)
+        inserted, prediction_result = await bulk_insert_sensor_data(request.cid, request.data)
+
+        prediction_detail = None
+        if prediction_result and prediction_result.get("prediction") not in (
+            "model_not_loaded", "insufficient_data", "error"
+        ):
+            from app.ml_model import derive_health_status
+
+            # Use the latest sensor row's vitals for health status derivation
+            latest_row = request.data[-1]
+            latest_temp = latest_row.temp_c
+            latest_bpm = latest_row.bpm if latest_row.bpm > 0 else None
+
+            prediction_detail = PredictionDetail(
+                behavior=prediction_result["prediction"],
+                status=derive_health_status(
+                    prediction_result["prediction"], latest_temp, latest_bpm
+                ),
+                window_count=prediction_result.get("window_count", 0),
+                window_predictions=prediction_result.get("window_predictions", []),
+            )
+
         return BulkInsertResponse(
             success=True,
             cid=request.cid,
             inserted_count=inserted,
             message=f"Successfully inserted {inserted} sensor readings for cattle {request.cid}",
+            prediction=prediction_detail,
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -175,6 +201,23 @@ async def get_latest(cid: int, user: Optional[dict] = Depends(get_current_user))
     if not doc:
         raise HTTPException(status_code=404, detail=f"No sensor data found for cid {cid}")
     return doc
+
+
+@sensor_router.get("/{cid}/status", response_model=CattleStatusResponse)
+async def get_status(cid: int, user: Optional[dict] = Depends(get_current_user)):
+    """
+    Get real-time health status for a cattle using ML prediction.
+    Fetches latest sensor data, runs the ML model, and returns
+    the predicted behavior and derived health status.
+    """
+    if user and user.get("farm_ids"):
+        cattle = await get_cattle_metadata(cid)
+        if cattle:
+            require_farm_access(user, cattle.get("farm_id", ""))
+    result = await get_cattle_status(cid)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"No sensor data found for cid {cid}")
+    return result
 
 
 @sensor_router.get("/{cid}/recent", response_model=list[SensorReadingResponse])

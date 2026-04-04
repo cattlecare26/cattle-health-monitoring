@@ -2,6 +2,7 @@
 Service layer: data transformation and database operations.
 Converts raw ESP32 flat data into structured MongoDB documents.
 Provides query functions for data retrieval APIs.
+Integrates ML model predictions into the sensor data pipeline.
 """
 
 from datetime import datetime, timedelta
@@ -10,6 +11,12 @@ from typing import Optional
 from app.models import SensorRow, SensorDocument, AccelData, GyroData, HeartData, CattleCreate, CattleUpdate
 from app.database import get_db, SENSOR_COLLECTION
 from app.logger import log_event
+from app.ml_model import (
+    is_model_loaded,
+    predict_from_raw_rows_async,
+    predict_from_db_docs_async,
+    derive_health_status,
+)
 
 # Fields to exclude from query results
 _PROJECTION = {"_id": 0}
@@ -52,11 +59,12 @@ def transform_sensor_rows(cid: int, rows: list[SensorRow]) -> list[dict]:
     return [transform_sensor_row(cid, row) for row in rows]
 
 
-async def bulk_insert_sensor_data(cid: int, rows: list[SensorRow]) -> int:
+async def bulk_insert_sensor_data(cid: int, rows: list[SensorRow]) -> tuple[int, Optional[dict]]:
     """
     Validate cattle exists, then transform and insert sensor data.
+    Runs ML prediction on the uploaded data and stores the result.
     Automatically triggers health evaluation after ingestion.
-    Returns the number of documents inserted.
+    Returns (inserted_count, prediction_result).
     Raises ValueError if cattle is not registered.
     """
     db = get_db()
@@ -81,6 +89,37 @@ async def bulk_insert_sensor_data(cid: int, rows: list[SensorRow]) -> int:
         message=f"Sensor batch inserted successfully for CID {cid}",
     )
 
+    # Run ML prediction on the uploaded data
+    prediction_result = None
+    if is_model_loaded():
+        try:
+            raw_dicts = [row.model_dump() for row in rows]
+            prediction_result = await predict_from_raw_rows_async(raw_dicts, cid)
+
+            # Get latest vitals for accurate status derivation
+            latest = rows[-1]
+            latest_temp = latest.temp_c
+            latest_bpm = latest.bpm if latest.bpm > 0 else None
+
+            # Store prediction in ml_predictions collection
+            await _store_ml_prediction(cid, prediction_result, latest_temp, latest_bpm)
+
+            # Log ML prediction
+            ml_status = derive_health_status(
+                prediction_result.get("prediction", "unknown"), latest_temp, latest_bpm
+            )
+            await log_event(
+                service="ml_engine", level="INFO", action="ml_prediction",
+                collection="ml_predictions", cid=cid,
+                prediction=prediction_result.get("prediction", "unknown"),
+                prediction_status=ml_status,
+                message=f"ML prediction for CID {cid}: {prediction_result.get('prediction', 'unknown')} (status: {ml_status})",
+            )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error("ML prediction failed in bulk_insert: %s", e, exc_info=True)
+            pass  # ML prediction should never block sensor ingestion
+
     # Trigger automatic health evaluation after sensor ingestion
     try:
         from app.alert_services import evaluate_cattle_health
@@ -88,7 +127,103 @@ async def bulk_insert_sensor_data(cid: int, rows: list[SensorRow]) -> int:
     except Exception:
         pass  # Alert evaluation should never block sensor ingestion
 
-    return inserted
+    return inserted, prediction_result
+
+
+async def _store_ml_prediction(
+    cid: int, prediction_result: dict,
+    temperature: Optional[float] = None, bpm: Optional[float] = None,
+) -> None:
+    """Store an ML prediction result in the ml_predictions collection."""
+    db = get_db()
+    doc = {
+        "cid": cid,
+        "prediction": prediction_result.get("prediction", "unknown"),
+        "status": derive_health_status(
+            prediction_result.get("prediction", "unknown"), temperature, bpm
+        ),
+        "window_count": prediction_result.get("window_count", 0),
+        "window_predictions": prediction_result.get("window_predictions", []),
+        "timestamp": datetime.utcnow(),
+    }
+    try:
+        await db.ml_predictions.insert_one(doc)
+    except Exception:
+        pass
+
+
+async def get_cattle_status(cid: int) -> Optional[dict]:
+    """
+    Get real-time cattle health status using ML prediction.
+    Fetches the latest sensor data, runs the ML model, and returns status.
+    Falls back to the most recent stored prediction if model is unavailable.
+    """
+    db = get_db()
+
+    # Fetch enough recent data for at least two 10-second windows
+    cursor = db[SENSOR_COLLECTION].find(
+        {"cid": cid}, {"_id": 0}
+    ).sort("timestamp_iso", -1).limit(150)
+    docs = await cursor.to_list(length=150)
+
+    if not docs:
+        return None
+
+    # Reverse to chronological order for feature extraction
+    docs.reverse()
+
+    # Get latest reading for temperature / BPM
+    latest = docs[-1]
+    temperature = latest.get("temperature")
+    bpm = latest.get("heart", {}).get("bpm")
+
+    if is_model_loaded():
+        prediction_result = await predict_from_db_docs_async(docs, cid)
+        behavior = prediction_result.get("prediction", "unknown")
+        status = derive_health_status(behavior, temperature, bpm if bpm else None)
+
+        # Store the prediction
+        await _store_ml_prediction(cid, prediction_result)
+
+        # Log the status check
+        await log_event(
+            service="ml_engine", level="INFO", action="ml_prediction",
+            collection="ml_predictions", cid=cid,
+            prediction=behavior, prediction_status=status,
+            message=f"Status check for CID {cid}: behavior={behavior}, status={status}",
+        )
+
+        return {
+            "cid": cid,
+            "behavior": behavior,
+            "status": status,
+            "temperature": temperature,
+            "bpm": bpm,
+            "timestamp": latest.get("timestamp_iso"),
+        }
+
+    # Fallback: use most recent stored prediction
+    stored = await db.ml_predictions.find_one(
+        {"cid": cid}, {"_id": 0}, sort=[("timestamp", -1)]
+    )
+    if stored:
+        return {
+            "cid": cid,
+            "behavior": stored.get("prediction", "unknown"),
+            "status": stored.get("status", "unknown"),
+            "temperature": temperature,
+            "bpm": bpm,
+            "timestamp": stored.get("timestamp"),
+        }
+
+    return {
+        "cid": cid,
+        "behavior": "unknown",
+        "status": "unknown",
+        "temperature": temperature,
+        "bpm": bpm,
+        "timestamp": latest.get("timestamp_iso"),
+    }
 
 
 # ── Data Retrieval Services ──

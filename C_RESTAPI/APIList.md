@@ -93,9 +93,25 @@ Counter resets when a healthy reading is detected.
 
 | Method | Endpoint | Access | Description |
 |--------|----------|--------|-------------|
-| `POST` | `/api/v1/cattle/sensor/bulk` | Admin / API Key | Bulk ingest sensor data from ESP32, transform and store in MongoDB. **Cattle must exist first (404 if not).** |
+| `POST` | `/api/v1/cattle/sensor/bulk` | Admin / API Key | Bulk ingest sensor data from ESP32, transform, store, and **run ML prediction**. **Cattle must exist first (404 if not).** |
 
 **Body:** `{ "cid": int, "data": [ ...sensor rows ] }`
+
+**Response includes ML prediction:**
+```json
+{
+  "success": true,
+  "cid": 1,
+  "inserted_count": 100,
+  "message": "Successfully inserted 100 sensor readings for cattle 1",
+  "prediction": {
+    "behavior": "Grazing",
+    "status": "normal",
+    "window_count": 2,
+    "window_predictions": ["Grazing", "Grazing"]
+  }
+}
+```
 
 ---
 
@@ -105,6 +121,7 @@ Counter resets when a healthy reading is detected.
 |--------|----------|--------|-------------|
 | `GET` | `/api/v1/cattle/latest` | Authenticated | Latest sensor reading for **all cattle** — dashboard overview |
 | `GET` | `/api/v1/cattle/{cid}/latest` | Authenticated | Most recent single sensor reading for a cattle |
+| `GET` | `/api/v1/cattle/{cid}/status` | Authenticated | **ML-based real-time health status** — predicted behavior + health status |
 | `GET` | `/api/v1/cattle/{cid}/recent?limit=N` | Authenticated | Last **N** sensor records (default 100, max 5000), newest first |
 | `GET` | `/api/v1/cattle/{cid}/last-hour` | Authenticated | All sensor readings from the **past 1 hour**, sorted ascending |
 | `GET` | `/api/v1/cattle/{cid}/range?start=ISO&end=ISO` | Authenticated | Sensor readings between two timestamps — for charts and analytics |
@@ -128,6 +145,51 @@ Counter resets when a healthy reading is detected.
 | `limit` | query | int | Number of records to return |
 | `start` | query | datetime | Start time in ISO 8601 format |
 | `end` | query | datetime | End time in ISO 8601 format |
+
+---
+
+## ML Prediction
+
+The ML model runs automatically on every sensor bulk upload and can be queried on demand via the status endpoint.
+
+### Prediction Labels
+
+| Behavior | Description |
+|----------|-------------|
+| `Grazing` | Consuming grass/feed |
+| `Walking` | Directed locomotion |
+| `Standing` | Stationary upright |
+| `Lying` | Recumbent posture |
+| `Ruminating` | Re-chewing cud |
+| `Drinking` | Consuming water |
+| `Other` | Miscellaneous/transitional |
+
+### Health Status Derivation
+
+| Status | Condition |
+|--------|-----------|
+| `normal` | Expected behavior + vitals within range |
+| `warning` | "Other" behavior detected |
+| `anomaly` | Temperature or BPM outside healthy range |
+| `unknown` | Insufficient data or model unavailable |
+
+### Status Endpoint
+
+| Method | Endpoint | Access | Description |
+|--------|----------|--------|-------------|
+| `GET` | `/api/v1/cattle/{cid}/status` | Authenticated | Real-time health status via ML prediction |
+
+**Response:**
+```json
+{
+  "cid": 1,
+  "behavior": "Grazing",
+  "status": "normal",
+  "temperature": 38.5,
+  "bpm": 72.0,
+  "timestamp": "2026-03-08T18:30:00Z"
+}
+```
 
 ---
 
