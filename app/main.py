@@ -66,8 +66,14 @@ async def _seed_default_users() -> None:
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown events."""
     await connect_db()
-    await _seed_default_users()
-    load_model()
+    try:
+        await _seed_default_users()
+    except Exception as e:
+        print(f"⚠️  User seeding skipped: {e}")
+    try:
+        load_model()
+    except Exception as e:
+        print(f"⚠️  ML model loading skipped: {e}")
     yield
     await close_db()
 
