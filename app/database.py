@@ -86,6 +86,16 @@ async def connect_db() -> None:
     except Exception:
         pass
 
+    # ML predictions indexes
+    try:
+        await db.ml_predictions.create_index([("cid", 1), ("timestamp", -1)])
+    except Exception:
+        pass
+    try:
+        await db.ml_predictions.create_index("cid")
+    except Exception:
+        pass
+
     # Health alert indexes
     try:
         await db.health_alerts.create_index("cid")
@@ -101,6 +111,16 @@ async def connect_db() -> None:
         pass
     try:
         await db.alert_counters.create_index("cid", unique=True)
+    except Exception:
+        pass
+
+    # Cattle doctor/owner reference indexes
+    try:
+        await db.cattle.create_index("doctor_id")
+    except Exception:
+        pass
+    try:
+        await db.cattle.create_index("owner_id")
     except Exception:
         pass
 

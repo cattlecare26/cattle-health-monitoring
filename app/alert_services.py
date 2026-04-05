@@ -2,6 +2,7 @@
 Alert orchestration service.
 Tracks consecutive bad readings, determines alert levels,
 generates graphs, sends notifications, and logs alerts.
+Combines rule-based threshold checks with ML behavior predictions.
 """
 
 from datetime import datetime
@@ -12,8 +13,9 @@ from app.database import get_db, SENSOR_COLLECTION
 from app.health_evaluator import evaluate_reading, evaluate_readings, determine_overall_status
 from app.graph_service import fetch_graph_data, generate_health_graph
 from app.email_service import send_health_alert_email, is_email_configured
-from app.user_services import get_admins_by_farm_id
+from app.user_services import get_admins_by_farm_id, get_user_by_id
 from app.logger import log_event
+from app.ml_model import is_model_loaded, predict_from_db_docs, derive_health_status
 
 ALERT_COUNTERS = "alert_counters"
 HEALTH_ALERTS = "health_alerts"
@@ -90,16 +92,18 @@ async def evaluate_cattle_health(cid: int) -> dict:
     """
     Full health evaluation pipeline for a single cattle:
     1. Fetch recent sensor readings
-    2. Evaluate against thresholds
-    3. Update consecutive counter
-    4. If alert triggered → generate graph → send email → log alert
-    5. Return evaluation result
+    2. Evaluate against thresholds (rule-based)
+    3. Run ML behavior prediction
+    4. Combine both signals into overall status
+    5. Update consecutive counter
+    6. If alert triggered → generate graph → send email → log alert
+    7. Return evaluation result
 
     This function is idempotent — safe to call multiple times.
     """
     db = get_db()
 
-    # 1. Fetch the latest sensor readings (last 5 for evaluation)
+    # 1. Fetch the latest sensor readings (last 5 for threshold evaluation)
     cursor = db[SENSOR_COLLECTION].find(
         {"cid": cid}, {"_id": 0}
     ).sort("timestamp_iso", -1).limit(5)
@@ -114,33 +118,65 @@ async def evaluate_cattle_health(cid: int) -> dict:
             "alert_triggered": False,
             "email_sent": False,
             "conditions": [],
+            "ml_prediction": None,
             "message": f"No sensor data available for cattle {cid}",
         }
 
-    # 2. Evaluate readings
+    # 2. Rule-based threshold evaluation
     evaluations = evaluate_readings(recent_readings)
-    overall_status = determine_overall_status(evaluations)
+    rule_status = determine_overall_status(evaluations)
 
-    # 3. Update counter
+    # 3. ML behavior prediction
+    ml_behavior = None
+    ml_status = None
+    if is_model_loaded():
+        try:
+            # Fetch more data for ML (needs 10-second windows)
+            ml_cursor = db[SENSOR_COLLECTION].find(
+                {"cid": cid}, {"_id": 0}
+            ).sort("timestamp_iso", -1).limit(150)
+            ml_readings = await ml_cursor.to_list(length=150)
+            ml_readings.reverse()
+
+            ml_result = predict_from_db_docs(ml_readings, cid)
+            ml_behavior = ml_result.get("prediction")
+
+            # Get latest vitals for combined status derivation
+            latest_temp = recent_readings[0].get("temperature")
+            latest_bpm = recent_readings[0].get("heart", {}).get("bpm")
+            ml_status = derive_health_status(
+                ml_behavior, latest_temp, latest_bpm if latest_bpm else None
+            )
+        except Exception:
+            pass  # ML should never block alert evaluation
+
+    # 4. Combine rule-based + ML status
+    overall_status = _combine_statuses(rule_status, ml_status)
+
+    # 5. Update counter
     counter = await update_counter(cid, overall_status)
     consecutive_count = counter["consecutive_bad_count"]
 
-    # 4. Determine alert level
+    # 6. Determine alert level
     alert_level = determine_alert_level(consecutive_count)
-    alert_triggered = alert_level is not None and overall_status != "healthy"
+    # Only trigger full alert (email + graph) at critical level (threshold met)
+    alert_triggered = alert_level == "critical" and overall_status != "healthy"
 
     email_sent = False
     graph_generated = False
 
     if alert_triggered:
-        # Get cattle info for farm lookup
+        # Get cattle info for doctor lookup
         cattle = await db.cattle.find_one({"cid": cid}, {"_id": 0})
         farm_id = cattle.get("farm_id", "") if cattle else ""
+        doctor_id = cattle.get("doctor_id") if cattle else None
 
-        # Build health summary
+        # Build health summary including ML prediction
         all_reasons = []
         for e in evaluations:
             all_reasons.extend(e.get("reasons", []))
+        if ml_behavior and ml_status in ("warning", "anomaly"):
+            all_reasons.append(f"ML detected behavior: {ml_behavior} (status: {ml_status})")
         health_summary = "<br>".join(set(all_reasons)) if all_reasons else "Multiple abnormal readings detected."
 
         # Generate graph
@@ -148,33 +184,43 @@ async def evaluate_cattle_health(cid: int) -> dict:
         graph_png = generate_health_graph(cid, graph_data)
         graph_generated = True
 
-        # Find admins for this farm
-        admins = await get_admins_by_farm_id(farm_id) if farm_id else []
+        # Resolve email recipient: cattle's doctor → fallback to default
+        recipient_email = settings.DEFAULT_DOCTOR_EMAIL
+        recipient_name = "Veterinary Doctor"
 
-        # Send emails to all relevant admins
-        for admin in admins:
-            sent = await send_health_alert_email(
-                to_email=admin.get("email", ""),
-                admin_name=admin.get("full_name", admin.get("username", "Admin")),
-                cid=cid,
-                alert_status=alert_level,
-                consecutive_count=consecutive_count,
-                health_summary=health_summary,
-                graph_png=graph_png,
-            )
-            if sent:
-                email_sent = True
+        if doctor_id:
+            doctor = await get_user_by_id(doctor_id)
+            if doctor and doctor.get("email"):
+                recipient_email = doctor["email"]
+                recipient_name = doctor.get("full_name", doctor.get("username", "Doctor"))
+
+        # Send alert email to the doctor
+        sent = await send_health_alert_email(
+            to_email=recipient_email,
+            recipient_name=recipient_name,
+            cid=cid,
+            alert_status=alert_level,
+            consecutive_count=consecutive_count,
+            health_summary=health_summary,
+            graph_png=graph_png,
+        )
+        if sent:
+            email_sent = True
 
         # Log the alert
         alert_doc = {
             "cid": cid,
-            "admin_username": admins[0].get("username", "unknown") if admins else "no_admin",
-            "admin_email": admins[0].get("email", "") if admins else "",
+            "doctor_id": doctor_id or "default",
+            "doctor_email": recipient_email,
+            "doctor_name": recipient_name,
             "status": alert_level,
             "consecutive_count": consecutive_count,
             "email_sent": email_sent,
             "health_details": {
                 "overall_status": overall_status,
+                "rule_status": rule_status,
+                "ml_behavior": ml_behavior,
+                "ml_status": ml_status,
                 "reasons": list(set(all_reasons)),
                 "latest_temperature": evaluations[0].get("temperature") if evaluations else None,
                 "latest_bpm": evaluations[0].get("bpm") if evaluations else None,
@@ -186,11 +232,15 @@ async def evaluate_cattle_health(cid: int) -> dict:
 
         await log_event(
             service="alert_system",
-            level="WARNING" if alert_level == "warning" else "ERROR",
-            action=f"{alert_level}_alert",
+            level="ERROR",
+            action="critical_alert",
             collection=HEALTH_ALERTS,
             cid=cid,
-            message=f"{alert_level.upper()} alert for CID {cid}: {consecutive_count} consecutive bad readings",
+            prediction=ml_behavior,
+            prediction_status=ml_status,
+            message=f"CRITICAL alert for CID {cid}: {consecutive_count} consecutive bad readings, "
+                    f"email sent to {recipient_email}"
+                    + (f", ML behavior: {ml_behavior}" if ml_behavior else ""),
         )
 
     return {
@@ -201,8 +251,33 @@ async def evaluate_cattle_health(cid: int) -> dict:
         "alert_triggered": alert_triggered,
         "email_sent": email_sent,
         "conditions": evaluations,
+        "ml_prediction": {"behavior": ml_behavior, "status": ml_status} if ml_behavior else None,
         "message": _build_message(cid, overall_status, consecutive_count, alert_level, email_sent),
     }
+
+
+def _combine_statuses(rule_status: str, ml_status: Optional[str]) -> str:
+    """
+    Combine rule-based and ML health statuses.
+    Either system can escalate the overall status.
+
+    Priority: bad/anomaly > warning > healthy/normal
+    """
+    if ml_status is None:
+        return rule_status
+
+    # Map ML status to rule-based equivalents
+    ml_mapped = {"anomaly": "bad", "warning": "warning", "normal": "healthy", "unknown": "healthy"}
+    ml_equivalent = ml_mapped.get(ml_status, "healthy")
+
+    severity = {"healthy": 0, "warning": 1, "bad": 2}
+    rule_sev = severity.get(rule_status, 0)
+    ml_sev = severity.get(ml_equivalent, 0)
+
+    # Take the worse of the two
+    if ml_sev > rule_sev:
+        return ml_equivalent
+    return rule_status
 
 
 async def evaluate_all_cattle() -> dict:

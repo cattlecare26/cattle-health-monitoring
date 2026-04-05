@@ -21,7 +21,7 @@ def is_email_configured() -> bool:
 
 async def send_health_alert_email(
     to_email: str,
-    admin_name: str,
+    recipient_name: str,
     cid: int,
     alert_status: str,
     consecutive_count: int,
@@ -29,7 +29,7 @@ async def send_health_alert_email(
     graph_png: bytes = None,
 ) -> bool:
     """
-    Send a health alert email to an admin with an embedded graph.
+    Send a health alert email to the assigned doctor with an embedded graph.
 
     Returns True if email was sent successfully, False otherwise.
     """
@@ -51,7 +51,7 @@ async def send_health_alert_email(
         msg["To"] = to_email
 
         html_body = _build_html_body(
-            admin_name=admin_name,
+            recipient_name=recipient_name,
             cid=cid,
             alert_status=alert_status,
             consecutive_count=consecutive_count,
@@ -107,7 +107,7 @@ def _build_subject(cid: int, alert_status: str) -> str:
 
 
 def _build_html_body(
-    admin_name: str,
+    recipient_name: str,
     cid: int,
     alert_status: str,
     consecutive_count: int,
@@ -134,10 +134,10 @@ def _build_html_body(
         </div>
 
         <div style="background: #f9f9f9; padding: 20px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 8px 8px;">
-            <p>Hello <strong>{admin_name}</strong>,</p>
+            <p>Hello <strong>Dr. {recipient_name}</strong>,</p>
 
             <p>A <strong style="color: {status_color};">{alert_status}</strong> health alert has been
-            triggered for one of your cattle.</p>
+            triggered for one of your assigned cattle.</p>
 
             <table style="width: 100%; border-collapse: collapse; margin: 15px 0;">
                 <tr style="background: #ecf0f1;">

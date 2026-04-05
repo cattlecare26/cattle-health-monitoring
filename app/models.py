@@ -83,6 +83,8 @@ class CattleCreate(BaseModel):
     farm_id: str = Field(..., min_length=1)
     breed: str = Field(..., min_length=1)
     age: int = Field(..., ge=0)
+    doctor_id: Optional[str] = Field(default=None, description="Username of the assigned veterinary doctor")
+    owner_id: Optional[str] = Field(default=None, description="Username of the farmer/owner")
     status: str = "active"
 
 
@@ -92,6 +94,8 @@ class CattleUpdate(BaseModel):
     farm_id: Optional[str] = None
     breed: Optional[str] = None
     age: Optional[int] = Field(default=None, ge=0)
+    doctor_id: Optional[str] = Field(default=None, description="Username of the assigned veterinary doctor")
+    owner_id: Optional[str] = Field(default=None, description="Username of the farmer/owner")
     status: Optional[str] = None
 
 
@@ -105,6 +109,26 @@ class HealthEventModel(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
+# ── ML Prediction Models ──
+
+class PredictionDetail(BaseModel):
+    """ML model prediction details included in API responses."""
+    behavior: str = Field(..., description="Predicted behavior (e.g., Grazing, Lying, Walking)")
+    status: str = Field(..., description="Health status derived from prediction (normal/warning/anomaly)")
+    window_count: int = Field(0, description="Number of 10-second windows analyzed")
+    window_predictions: list[str] = Field(default_factory=list, description="Per-window behavior predictions")
+
+
+class CattleStatusResponse(BaseModel):
+    """Real-time cattle health status from ML model."""
+    cid: int
+    behavior: str = Field(..., description="Current predicted behavior")
+    status: str = Field(..., description="Health status: normal, warning, or anomaly")
+    temperature: Optional[float] = None
+    bpm: Optional[float] = None
+    timestamp: Optional[datetime] = None
+
+
 # ── Response Models ──
 
 class BulkInsertResponse(BaseModel):
@@ -112,6 +136,7 @@ class BulkInsertResponse(BaseModel):
     cid: int
     inserted_count: int
     message: str
+    prediction: Optional[PredictionDetail] = Field(None, description="ML behavior prediction")
 
 
 class CattleCreateResponse(BaseModel):
@@ -146,6 +171,8 @@ class CattleResponse(BaseModel):
     breed: str
     age: int
     status: str
+    doctor_id: Optional[str] = None
+    owner_id: Optional[str] = None
     created_at: Optional[datetime] = None
 
 

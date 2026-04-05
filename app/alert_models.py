@@ -4,6 +4,7 @@ Pydantic models for the health alert and notification system.
 
 from datetime import datetime
 from typing import Optional
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
@@ -37,8 +38,9 @@ class EvaluationResult(BaseModel):
 class HealthAlertRecord(BaseModel):
     """A health alert stored in the health_alerts collection."""
     cid: int
-    admin_username: str
-    admin_email: str
+    doctor_id: str = "default"
+    doctor_email: str = ""
+    doctor_name: str = ""
     status: str = Field(..., description="warning or critical")
     consecutive_count: int
     email_sent: bool = False
@@ -61,8 +63,9 @@ class AlertCounterRecord(BaseModel):
 class AlertResponse(BaseModel):
     """Single alert returned by API."""
     cid: int
-    admin_username: str
-    admin_email: str
+    doctor_id: Optional[str] = "default"
+    doctor_email: Optional[str] = ""
+    doctor_name: Optional[str] = ""
     status: str
     consecutive_count: int
     email_sent: bool

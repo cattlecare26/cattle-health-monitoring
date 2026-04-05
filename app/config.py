@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # Alert System Configuration
     ALERT_THRESHOLD: int = 4
     GRAPH_TIME_WINDOW: int = 48
+    DEFAULT_DOCTOR_EMAIL: str = "kowsiganmv@gmail.com"
+
+    # ML Model (Google Drive)
+    MODEL_DIR: str = "model"
+    MODEL_GDRIVE_ID: str = "1MwwePROS_ip5TZhGtvB1SLr8rpH_7k52"
+    LABEL_GDRIVE_ID: str = "1f8DY233JDiU1TKB7CX4kqwjoSnioFwkA"
+    MODEL_FILENAME: str = "cattle_model_v4.pkl"
+    LABEL_FILENAME: str = "le_v4.pkl"
 
     # Health Thresholds (configurable per deployment)
     TEMP_HIGH: float = 39.5

@@ -18,6 +18,8 @@ async def log_event(
     cid: Optional[int] = None,
     reference_id: Optional[str] = None,
     records_count: Optional[int] = None,
+    prediction: Optional[str] = None,
+    prediction_status: Optional[str] = None,
 ) -> None:
     """Insert a structured log document into the logs collection."""
     db = get_db()
@@ -35,6 +37,10 @@ async def log_event(
         doc["reference_id"] = reference_id
     if records_count is not None:
         doc["records_count"] = records_count
+    if prediction is not None:
+        doc["prediction"] = prediction
+    if prediction_status is not None:
+        doc["prediction_status"] = prediction_status
 
     try:
         await db[LOGS_COLLECTION].insert_one(doc)

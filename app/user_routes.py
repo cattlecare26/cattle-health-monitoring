@@ -41,6 +41,7 @@ async def register_user(
             email=data.email,
             password=data.password,
             full_name=data.full_name,
+            phone=data.phone,
             role=data.role,
             farm_ids=data.farm_ids,
         )
@@ -67,6 +68,7 @@ async def bootstrap_first_user(data: UserCreate):
             email=data.email,
             password=data.password,
             full_name=data.full_name,
+            phone=data.phone,
             role="admin",
             farm_ids=data.farm_ids,
         )

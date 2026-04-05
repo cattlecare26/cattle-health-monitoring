@@ -79,6 +79,7 @@ async def create_user(
     password: str,
     full_name: str,
     role: str = "user",
+    phone: Optional[str] = None,
     farm_ids: Optional[list[str]] = None,
 ) -> dict:
     """
@@ -105,6 +106,7 @@ async def create_user(
         "email": email,
         "hashed_password": hash_password(password),
         "full_name": full_name,
+        "phone": phone,
         "role": role,
         "farm_ids": farm_ids or [],
         "is_active": True,
@@ -194,6 +196,12 @@ async def get_admins_by_farm_id(farm_id: str) -> list[dict]:
         _USER_PROJECTION,
     )
     return await cursor.to_list(length=100)
+
+
+async def get_user_by_id(username: str) -> Optional[dict]:
+    """Fetch a user by username (without password). Used for doctor/owner lookups."""
+    db = get_db()
+    return await db.users.find_one({"username": username}, _USER_PROJECTION)
 
 
 async def deactivate_user(username: str) -> bool:
